@@ -8,14 +8,32 @@ class Analyzer {
     this._gemini = null;
   }
 
+  get _usesOpenRouter() {
+    return !!process.env.OPENROUTER_API_KEY;
+  }
+
   get openai() {
-    if (!process.env.OPENAI_API_KEY) {
-      throw new Error('OPENAI_API_KEY is not configured. Add it to your .env file.');
+    const apiKey = process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      throw new Error('No LLM key configured. Set OPENROUTER_API_KEY or OPENAI_API_KEY in your .env file.');
     }
     if (!this._openai) {
-      this._openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+      // OpenRouter is OpenAI-compatible — just point the SDK at its base URL.
+      this._openai = new OpenAI(
+        this._usesOpenRouter
+          ? { apiKey, baseURL: 'https://openrouter.ai/api/v1' }
+          : { apiKey }
+      );
     }
     return this._openai;
+  }
+
+  get model() {
+    if (this._usesOpenRouter) {
+      // Free keys only access ":free" models.
+      return process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.1-8b-instruct:free';
+    }
+    return process.env.OPENAI_MODEL || 'gpt-4';
   }
 
   get gemini() {
@@ -29,10 +47,13 @@ class Analyzer {
   }
 
   async analyzeCode(code, analysisType, language = 'javascript') {
+    const jsonOnly = '\n\nIMPORTANT: Respond with ONLY a single raw JSON object. ' +
+      'No markdown code fences, no prose, no commentary before or after the JSON.';
+
     const prompts = {
-      performance: this.getPerformancePrompt(language),
-      bugs: this.getBugPrompt(language),
-      security: this.getSecurityPrompt(language)
+      performance: this.getPerformancePrompt(language) + jsonOnly,
+      bugs: this.getBugPrompt(language) + jsonOnly,
+      security: this.getSecurityPrompt(language) + jsonOnly
     };
 
     try {
@@ -44,7 +65,7 @@ class Analyzer {
         raw = geminiResponse.response.text();
       } else {
         const completion = await this.openai.chat.completions.create({
-          model: 'gpt-4',
+          model: this.model,
           messages: [{ role: 'user', content: prompts[analysisType] + code }],
           temperature: analysisType === 'bugs' ? 0.2 : 0.1,
           max_tokens: 2000
@@ -170,20 +191,20 @@ Code: ${language}:
 
     let jsonStr = result.trim();
 
-    // Extract the first fenced JSON block, with or without a "json" tag.
+    // 1) Strip a fenced code block (``` or ```json ... ```).
     const fence = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
     if (fence) jsonStr = fence[1].trim();
+
+    // 2) Fallback: extract the outermost balanced { ... } object, in case the
+    //    model wrapped the JSON in explanatory prose.
+    if (!jsonStr.startsWith('{')) {
+      const obj = jsonStr.match(/\{[\s\S]*\}/);
+      if (obj) jsonStr = obj[0];
+    }
 
     try {
       return JSON.parse(jsonStr);
     } catch (parseError) {
-      // Fallback: grab the first balanced { ... } block (handles stray prose).
-      const obj = jsonStr.match(/\{[\s\S]*\}/);
-      if (obj) {
-        try {
-          return JSON.parse(obj[0]);
-        } catch (_) { /* fall through */ }
-      }
       console.error('Failed to parse analysis result:', parseError.message);
       return {
         issues: [],

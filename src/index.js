@@ -7,6 +7,8 @@
 
 const Fastify = require('fastify');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const dotenv = require('dotenv');
 const Analyzer = require('./analyzer/Analyzer');
 
@@ -146,6 +148,16 @@ app.post('/github/webhook', {
   }
 });
 
+// Interactive UI — serves public/index.html (the visual reviewer)
+app.get('/', async (request, reply) => {
+  try {
+    const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+    reply.type('text/html').send(html);
+  } catch (err) {
+    reply.code(404).send({ error: 'UI not found. Expected public/index.html' });
+  }
+});
+
 // Health check endpoint
 app.get('/health', async () => {
   return {
@@ -153,7 +165,8 @@ app.get('/health', async () => {
     timestamp: new Date().toISOString(),
     services: {
       openai: !!process.env.OPENAI_API_KEY,
-      gemini: !!process.env.GOOGLE_GEMINI_API_KEY
+      gemini: !!process.env.GOOGLE_GEMINI_API_KEY,
+      openrouter: !!process.env.OPENROUTER_API_KEY
     }
   };
 });
